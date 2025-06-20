@@ -103,10 +103,6 @@ function onTouchEnd(e) {
     const { gl, ext } = getWebGLContext(canvas);
 
     if (!ext.supportLinearFiltering) {
-        config.DYE_RESOLUTION = 512;
-    }
-
-    if (!ext.supportLinearFiltering) {
     config.DYE_RESOLUTION = 512;
     config.SHADING = false;
     }
@@ -230,28 +226,6 @@ function normalizeTexture (texture, width, height) {
 
 function clamp01 (input) {
     return Math.min(Math.max(input, 0), 1);
-}
-
-function textureToCanvas (texture, width, height) {
-    let captureCanvas = document.createElement('canvas');
-    let ctx = captureCanvas.getContext('2d');
-    captureCanvas.width = width;
-    captureCanvas.height = height;
-
-    let imageData = ctx.createImageData(width, height);
-    imageData.data.set(texture);
-    ctx.putImageData(imageData, 0, 0);
-
-    return captureCanvas;
-}
-
-function downloadURI (filename, uri) {
-    let link = document.createElement('a');
-    link.download = filename;
-    link.href = uri;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
 }
 
 class Material {
@@ -466,6 +440,7 @@ const displayShaderSource = `
     uniform sampler2D uDithering;
     uniform vec2 ditherScale;
     uniform vec2 texelSize;
+    uniform sampler2D uLogoMask;
 
     vec3 linearToGamma (vec3 color) {
         color = max(color, vec3(0));
@@ -473,7 +448,15 @@ const displayShaderSource = `
     }
 
     void main () {
-        vec3 c = texture2D(uTexture, vUv).rgb;
+        vec3 c = texture2D(uTexture, vUv).rgb * 3.0;
+
+        vec2 center = vec2(0.5, 0.5);
+        float scale = 0.5;
+
+        vec2 maskUv = (vUv - center) / scale + center;
+        maskUv.y = 1.0 - maskUv.y;
+        float mask = texture2D(uLogoMask, maskUv).r;
+        if (mask > 0.5) discard;
 
     #ifdef SHADING
         vec3 lc = texture2D(uTexture, vL).rgb;
@@ -528,6 +511,7 @@ const advectionShader = compileShader(gl.FRAGMENT_SHADER, `
     uniform vec2 dyeTexelSize;
     uniform float dt;
     uniform float dissipation;
+    uniform sampler2D uLogoMask;
 
     vec4 bilerp (sampler2D sam, vec2 uv, vec2 tsize) {
         vec2 st = uv / tsize - 0.5;
@@ -544,6 +528,18 @@ const advectionShader = compileShader(gl.FRAGMENT_SHADER, `
     }
 
     void main () {
+    vec2 center = vec2(0.5, 0.5);
+    float scale = 0.5; // Cambia questo se vuoi scalare il logo
+    vec2 maskUv = (vUv - center) / scale + center;
+    maskUv.y = 1.0 - maskUv.y; // Se ti serve flip verticale
+
+        float mask = texture2D(uLogoMask, maskUv).r;
+
+        
+        if (mask > 0.5) {
+            gl_FragColor = vec4(0.0); // oppure lascia il dye immutato
+            return;
+        }
     #ifdef MANUAL_FILTERING
         vec2 coord = vUv - dt * bilerp(uVelocity, vUv, texelSize).xy * texelSize;
         vec4 result = bilerp(uSource, coord, dyeTexelSize);
@@ -729,6 +725,8 @@ let pressure;
 
 let ditheringTexture = createTextureAsync('/texture/LDR_LLL1_0.png');
 
+let logoMaskTexture = createTextureAsync('/texture/logo-main.png', gl.CLAMP_TO_EDGE, gl.CLAMP_TO_EDGE);
+
 const blurProgram            = new Program(blurVertexShader, blurShader);
 const copyProgram            = new Program(baseVertexShader, copyShader);
 const clearProgram           = new Program(baseVertexShader, clearShader);
@@ -855,13 +853,13 @@ function resizeDoubleFBO (target, w, h, internalFormat, format, type, param) {
     return target;
 }
 
-function createTextureAsync (url) {
+function createTextureAsync (url, wrapS = gl.REPEAT, wrapT = gl.REPEAT) {
     let texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapS);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrapT);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, 1, 1, 0, gl.RGB, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255]));
 
     let obj = {
@@ -994,6 +992,7 @@ function step (dt) {
     gl.uniform1i(advectionProgram.uniforms.uSource, velocityId);
     gl.uniform1f(advectionProgram.uniforms.dt, dt);
     gl.uniform1f(advectionProgram.uniforms.dissipation, config.VELOCITY_DISSIPATION);
+    gl.uniform1i(advectionProgram.uniforms.uLogoMask, logoMaskTexture.attach(3))
     blit(velocity.write);
     velocity.swap();
 
@@ -1043,6 +1042,9 @@ function drawDisplay (target) {
     if (config.SHADING)
         gl.uniform2f(displayMaterial.uniforms.texelSize, 1.0 / width, 1.0 / height);
     gl.uniform1i(displayMaterial.uniforms.uTexture, dye.read.attach(0));
+    gl.uniform1i(displayMaterial.uniforms.uLogoMask, logoMaskTexture.attach(2));
+
+    blit(target);
 }
 
 
@@ -1156,9 +1158,9 @@ function correctDeltaY (delta) {
 
 function generateColor () {
     let c = HSVtoRGB(Math.random(), 1.0, 1.0);
-    c.r *= 0.15;
-    c.g *= 0.15;
-    c.b *= 0.15;
+    c.r *= 0.3;
+    c.g *= 0.3;
+    c.b *= 0.3;
     return c;
 }
 

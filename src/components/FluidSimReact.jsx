@@ -14,7 +14,6 @@ export default function FluidSim() {
     <canvas
       ref={canvasRef}
       style={{
-        border: "2px solid red",
         position: "absolute",
         top: 0, left: 0,
         width: "100vw",
@@ -22,9 +21,6 @@ export default function FluidSim() {
         zIndex: 0,
         display: "block"
       }}
-      width={window.innerWidth}
-      height={window.innerHeight}
-      tabIndex={-1}
     />
   );
 }
